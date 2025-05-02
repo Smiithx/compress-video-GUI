@@ -23,10 +23,6 @@ Muestra en tiempo real la salida de `ffmpeg` en un área de texto desplazable y 
 ## Instalación
 
 ```bash
-# Clona el repositorio
-git clone https://github.com/tu-usuario/tu-repo.git
-cd tu-repo
-
 # (Opcional) Crea y activa un entorno virtual
 python -m venv venv
 # Linux/macOS
