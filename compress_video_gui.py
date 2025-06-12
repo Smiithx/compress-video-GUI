@@ -19,6 +19,19 @@ from tkinter import filedialog, ttk, scrolledtext, messagebox
 # Configuración de presets disponibles
 default_presets = ['ultrafast','superfast','veryfast','faster','fast','medium','slow','slower','veryslow']
 
+def is_nvenc_supported() -> bool:
+    """
+    Comprueba si ffmpeg soporta el encoder h264_nvenc.
+    """
+    try:
+        out = subprocess.run(
+            ['ffmpeg', '-encoders'],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True
+        ).stdout
+        return 'h264_nvenc' in out
+    except Exception:
+        return False
 
 def compress(input_path: str,
              output_path: str,
@@ -26,22 +39,36 @@ def compress(input_path: str,
              preset: str,
              audio_bitrate: str,
              threads: int,
+             use_gpu: bool,
              log_widget: scrolledtext.ScrolledText):
     """
     Ejecuta ffmpeg para comprimir el vídeo dado y escribe logs en el widget.
     """
-    cmd = [
-        'ffmpeg',
-        '-y',
-        '-i', input_path,
-        '-c:v', 'libx264',
-        '-preset', preset,
-        '-crf', str(crf),
-        '-c:a', 'aac',
-        '-b:a', audio_bitrate,
-        '-threads', str(threads),
-        output_path
-    ]
+    if use_gpu:
+        # GPU: decodificación y codificación por NVENC
+        cmd = [
+            'ffmpeg', '-y',
+            '-hwaccel', 'cuda',
+            '-i', input_path,
+            '-c:v', 'h264_nvenc',
+            '-preset', preset,  # NVENC acepta presets similares
+            '-rc', 'vbr',
+            '-cq', str(crf),  # calidad constante
+            '-c:a', 'aac', '-b:a', audio_bitrate,
+            output_path
+        ]
+    else:
+        # CPU clásico con libx264
+        cmd = [
+            'ffmpeg', '-y',
+            '-i', input_path,
+            '-c:v', 'libx264',
+            '-preset', preset,
+            '-crf', str(crf),
+            '-c:a', 'aac', '-b:a', audio_bitrate,
+            '-threads', str(threads),
+            output_path
+        ]
 
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     for line in process.stdout:
@@ -75,6 +102,14 @@ def start_compression(params, log_widget, btn_start):
     preset = params['preset'].get()
     audio_bitrate = params['audio_bitrate'].get()
     threads = int(params['threads'].get())
+    use_gpu = params['use_gpu'].get()
+
+    if use_gpu and not is_nvenc_supported():
+        messagebox.showwarning(
+            "NVENC no disponible",
+            "No se detecta h264_nvenc en ffmpeg; usando CPU (libx264)."
+        )
+        use_gpu = False
 
     for in_file in inputs:
         base, _ = os.path.splitext(os.path.basename(in_file))
@@ -85,9 +120,8 @@ def start_compression(params, log_widget, btn_start):
                 out_file = out_base
         else:
             out_file = os.path.join(os.path.dirname(in_file), f"{base}_compressed.mp4")
-
         log_widget.insert(tk.END, f"\nComprimir: {in_file}\n")
-        code = compress(in_file, out_file, crf, preset, audio_bitrate, threads, log_widget)
+        code = compress(in_file, out_file, crf, preset, audio_bitrate, threads, use_gpu, log_widget)
         if code != 0:
             log_widget.insert(tk.END, f"⚠️ Error al comprimir {in_file} (codigo {code})\n")
         else:
@@ -109,13 +143,16 @@ def create_gui():
     frame.pack(fill=tk.BOTH, expand=True)
 
     # Parámetros de entrada
+    gpu_supported = is_nvenc_supported()
+
     params = {
         'input_path': tk.StringVar(),
         'output_path': tk.StringVar(),
         'crf': tk.StringVar(value='23'),
         'preset': tk.StringVar(value='slow'),
         'audio_bitrate': tk.StringVar(value='128k'),
-        'threads': tk.StringVar(value='0')
+        'threads': tk.StringVar(value='0'),
+        'use_gpu': tk.BooleanVar(value=gpu_supported),
     }
 
     # Input file/folder
@@ -136,6 +173,13 @@ def create_gui():
     crf_spin = ttk.Spinbox(frame, from_=18, to=28, textvariable=params['crf'], width=5)
     crf_spin.grid(column=1, row=2, sticky=tk.W)
 
+    # Añade tras el Spinbox de hilos (row=5)
+    ttk.Checkbutton(
+        frame,
+        text="Usar GPU (NVENC)",
+        variable=params['use_gpu']
+    ).grid(column=1, row=6, sticky=tk.W, pady=(0, 10))
+
     # Preset
     ttk.Label(frame, text="Preset:").grid(column=0, row=3, sticky=tk.W)
     preset_combo = ttk.Combobox(frame, values=default_presets, textvariable=params['preset'], state='readonly')
@@ -151,11 +195,16 @@ def create_gui():
 
     # Botón iniciar
     btn_start = ttk.Button(frame, text="Iniciar Compresión", command=lambda: threading.Thread(target=start_compression, args=(params, log, btn_start), daemon=True).start())
-    btn_start.grid(column=1, row=6, pady=10)
+    btn_start.grid(column=1, row=7, pady=10)
 
     # Área de logs
     log = scrolledtext.ScrolledText(frame, width=80, height=20)
-    log.grid(column=0, row=7, columnspan=4, pady=10)
+    log.grid(column=0, row=8, columnspan=4, pady=10)
+
+    if not gpu_supported:
+        # deshabilita y grisa el checkbox
+        cb = frame.nametowidget(frame.grid_slaves(row=6, column=1)[0])
+        cb.config(state=tk.DISABLED, text="Usar GPU (NVENC) — no detectada")
 
     root.mainloop()
 
